@@ -5,7 +5,7 @@ import socket
 import serial
 
 
-ip = '192.168.1.222' #오모로봇 포트
+ip = '192.168.1.222' #omorobot port
 port = 1234 
 
 server_socket = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
@@ -17,7 +17,7 @@ while(1):
     data, address = server_socket.recvfrom(1024)
     ser.write(data)
     print(data)
-    if (data == b'1111'): #데이터로 1111을 보내면 정지
+    if (data == b'1111'): #If you send 1111, it will stop
         break
 
 server_socket.close()
