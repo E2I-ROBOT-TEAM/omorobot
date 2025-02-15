@@ -5,7 +5,7 @@ import socket
 import serial
 
 
-ip = '192.168.1.222' #omorobot port
+ip = '192.168.1.222' #omorobot ip
 port = 1234 
 
 server_socket = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
