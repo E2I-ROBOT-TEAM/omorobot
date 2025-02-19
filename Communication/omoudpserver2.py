@@ -10,10 +10,10 @@ Receivedata=b''
 
 def DataReceive():
     while True:
-        print('receiving')
         Receivedata=b''
         ser.write(b'$qPOSE\r\n')
         Receivedata=ser.readline()
+        print(Receivedata)
         time.sleep(0.2)
     
     
