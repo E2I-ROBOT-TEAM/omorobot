@@ -8,7 +8,7 @@ import serial
 
 Receivedata=b''
 
-def thread():
+def DataReceive():
     while True:
         print('receiving')
         Receivedata=b''
@@ -17,7 +17,7 @@ def thread():
         time.sleep(0.2)
     
     
-thread = threading.Thread(target=thread)
+thread = threading.Thread(target=DataReceive)
 thread.start()
 
 
