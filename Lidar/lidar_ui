@@ -1,0 +1,175 @@
+import sys
+import serial
+import re
+import math
+import numpy as np
+import cv2
+import time
+import threading
+
+from PyQt5.QtWidgets import QApplication, QDialog
+from PyQt5 import uic, QtGui, QtCore
+
+
+class YDLidarG2(QtCore.QObject):
+    image_updated = QtCore.pyqtSignal(np.ndarray)  # 시각화 프레임 전달 시그널
+
+    def __init__(self, port='COM6', baudrate=230400, width=1000, height=1000, grid_interval=100):
+        super().__init__()
+        self.port = port
+        self.baudrate = baudrate
+        self.WIDTH = width
+        self.HEIGHT = height
+        self.INTER = grid_interval
+        self.MIN_LENGTH = 13
+        self.xys = []
+        self.stop_flag = False
+        self.serial = None
+
+    def check_code(self, data):
+        len_data = len(data)
+        lsn = data[3]
+        fsa1 = data[4]
+        fsa2 = data[5]
+        lsa1 = data[6]
+        lsa2 = data[7]
+        cs = data[8] | (data[9] << 8)
+
+        ph = data[0] | (data[1] << 8)
+        tmp_cs = ph ^ (data[2] | (data[3] << 8))
+        tmp_cs ^= (fsa1 | (fsa2 << 8))
+        tmp_cs ^= (lsa1 | (lsa2 << 8))
+
+        for n in range(lsn):
+            if 10 + 3 * n + 2 >= len_data:
+                break
+            tmp_cs ^= data[10 + 3 * n]
+            tmp_cs ^= (data[10 + 3 * n + 1] | (data[10 + 3 * n + 2] << 8))
+
+        return cs == tmp_cs
+
+    def first_level_angle(self, lsb, msb):
+        return ((lsb | (msb << 8)) >> 1) / 64.0
+
+    def diff_angle(self, end_angle, start_angle):
+        if end_angle < start_angle:
+            end_angle += 360
+        return end_angle - start_angle
+
+    def inter_angle(self, idx, diff_angle, lsn, start_angle):
+        ret = (diff_angle / (lsn - 1)) * idx + start_angle
+        return ret - 360 if ret >= 360 else ret
+
+    def angle_correct(self, angle, distance):
+        if distance == 0:
+            return 0.0
+        my_angle = angle + math.degrees(math.atan2(21.8 * (155.3 - distance), 155.3 * distance))
+        return 360 + my_angle if my_angle < 0 else my_angle
+
+    def scan_values(self):
+        self.serial = serial.Serial(self.port, self.baudrate)
+        self.serial.write(b'\xa5\x60')  # 스캔 시작 명령
+
+        while not self.stop_flag:
+            xs, ys = [], []
+            read_data = self.serial.read(5000)
+            idxs = [m.start() for m in re.finditer(b"\xaa\x55", read_data)]
+            len_read = len(read_data)
+
+            for i in range(len(idxs)):
+                data = read_data[idxs[i]: (idxs[i + 1] if i < len(idxs) - 1 else len_read)]
+                if len(data) <= self.MIN_LENGTH:
+                    continue
+
+                lsn = data[3]
+                if lsn != 1:
+                    fsa1, fsa2, lsa1, lsa2 = data[4], data[5], data[6], data[7]
+                    if not self.check_code(data):
+                        continue
+
+                    start_angle = self.first_level_angle(fsa1, fsa2)
+                    end_angle = self.first_level_angle(lsa1, lsa2)
+                    diff_angle_ = self.diff_angle(end_angle, start_angle)
+
+                    for j in range(lsn):
+                        if 10 + 3 * j + 2 >= len(data):
+                            break
+
+                        intensity = data[10 + 3 * j] + (data[10 + 3 * j + 1] & 0b11) * 256
+                        distance = ((data[10 + 3 * j + 1] >> 2) | (data[10 + 3 * j + 2] << 6))
+
+                        if intensity < 10 or distance > 16000:
+                            continue
+
+                        angle = (start_angle if j == 0 else end_angle if j == lsn - 1
+                                 else self.inter_angle(j, diff_angle_, lsn, start_angle))
+                        angle_correct_ = self.angle_correct(angle, distance)
+
+                        pos_x = distance * math.cos(math.radians(angle_correct_))
+                        pos_y = distance * math.sin(math.radians(angle_correct_))
+
+                        xs.append(pos_x)
+                        ys.append(pos_y)
+
+            self.xys.append([xs, ys])
+
+        self.serial.write(b'\xa5\x65')  # 스캔 중지
+        self.serial.close()
+
+    def my_viz(self):
+        background_color = 70
+        grid_color = (100, 100, 100)
+        grid_thickness = 1
+        row_numbers = int(self.HEIGHT / 100)
+        column_numbers = int(self.WIDTH / 100)
+
+        while not self.stop_flag:
+            img = np.full((self.HEIGHT, self.WIDTH, 3), background_color, dtype=np.uint8)
+
+            # 격자
+            for i in range(1, column_numbers):
+                cv2.line(img, (i * self.INTER, 0), (i * self.INTER, self.HEIGHT), grid_color, grid_thickness)
+            for i in range(1, row_numbers):
+                cv2.line(img, (0, i * self.INTER), (self.WIDTH, i * self.INTER), grid_color, grid_thickness)
+
+            center = (self.WIDTH // 2, self.HEIGHT // 2)
+            cv2.circle(img, center, 5, (0, 255, 0), cv2.FILLED)
+
+            if self.xys:
+                xy = self.xys.pop(0)
+                x = np.array(xy[0], dtype=np.int16) // 10 + self.WIDTH // 2
+                y = np.array(xy[1], dtype=np.int16) // 10 + self.HEIGHT // 2
+                for i in range(len(x)):
+                    cv2.circle(img, (x[i], y[i]), 1, (0, 0, 255), cv2.FILLED)
+
+            self.image_updated.emit(img)  # PyQt에 프레임 전달
+            time.sleep(0.04)
+
+    def run(self):
+        t1 = threading.Thread(target=self.scan_values, daemon=True)
+        t2 = threading.Thread(target=self.my_viz, daemon=True)
+        t1.start()
+        t2.start()
+
+
+class MyDialog(QDialog):
+    def __init__(self):
+        super().__init__()
+        uic.loadUi("speed_dial.ui", self)  # Qt Designer에서 만든 ui 파일
+        self.lidar = YDLidarG2()
+        self.lidar.image_updated.connect(self.update_lidar_display)
+        self.lidar.run()
+
+    def update_lidar_display(self, img: np.ndarray):
+        rgb_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_image.shape
+        bytes_per_line = ch * w
+        qt_image = QtGui.QImage(rgb_image.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
+        self.Lidar_monitor.setPixmap(QtGui.QPixmap.fromImage(qt_image))
+
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    dlg = MyDialog()
+    dlg.show()
+    sys.exit(app.exec_())
